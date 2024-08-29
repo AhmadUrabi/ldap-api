@@ -64,7 +64,7 @@ pub fn create_user(ldap: &mut LdapConn) {
 
     println!("Add result: {:?}", res);
 
-    ***REMOVED***
+    
 
     // Convert the password to UTF-16LE and wrap in quotes
     let mut password_utf16: HashSet<&str> = HashSet::new();
