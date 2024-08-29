@@ -1,0 +1,8 @@
+[package]
+name = "ldap-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dotenv = "0.15.0"
+ldap3 = "0.11.5"
