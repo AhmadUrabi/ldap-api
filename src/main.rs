@@ -1,11 +1,28 @@
-use std::collections::HashSet;
+#[macro_use] extern crate rocket;
+use std::sync::Arc;
 
-use ldap3::{LdapConn, LdapConnSettings, Scope, SearchEntry};
+use ldap3::{drive, Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
 
 use dotenv::dotenv;
+use rocket::{serde::json::Json, State};
+use user::UserAccount;
 
-fn main() -> Result<(), String> {
+pub mod auth;
+pub mod user;
 
+pub struct ServerState {
+    ldap: Arc<rocket::tokio::sync::Mutex<Ldap>>,
+}
+
+#[get("/users")]
+pub async fn get_all_users(state: &State<ServerState>) -> Json<Vec<UserAccount>> {
+    let mut ldap = state.ldap.lock().await;
+    let users = fetch_all_users(&mut ldap).await;   
+    Json(users)
+}
+
+#[launch]
+async fn rocket() -> _ {
     dotenv().ok();
 
     // Define the LDAP server address
@@ -17,18 +34,20 @@ fn main() -> Result<(), String> {
 
     // Establish a connection with the LDAP server
     let ldap_conn_settings = LdapConnSettings::new().set_starttls(true);
-    let mut ldap = LdapConn::with_settings(ldap_conn_settings, ldap_server.as_str()).unwrap();
+    let (conn, mut ldap) = LdapConnAsync::with_settings(ldap_conn_settings, ldap_server.as_str()).await.unwrap();
 
-    // Bind to the server (authenticate)
-    ldap.simple_bind(username.as_str(), password.as_str()).unwrap().success().unwrap();
+    drive!(conn);
 
-    fetch_all_users(&mut ldap);   
-    
+    ldap.simple_bind(username.as_str(), password.as_str()).await.unwrap().success().unwrap();
 
-    Ok(())
+    let server_state = ServerState {
+        ldap: Arc::new(rocket::tokio::sync::Mutex::new(ldap)),
+    };
+
+    rocket::build().manage(server_state).mount("/", routes![get_all_users])
 }
 
-pub fn fetch_all_users(ldap: &mut LdapConn) {
+pub async fn fetch_all_users(ldap: &mut Ldap) -> Vec<UserAccount> {
     let base_dn = "OU=HQ,DC=urabi,DC=net";
     // Perform a search
     let (rs, _res) = ldap.search(
@@ -36,59 +55,15 @@ pub fn fetch_all_users(ldap: &mut LdapConn) {
         Scope::Subtree,
         "(objectClass=user)",
         vec!["*", "+"],
-    ).unwrap().success().unwrap();
+    ).await.unwrap().success().unwrap();
+
+    let mut res = Vec::new();
 
     // Iterate through search results and print them
     for entry in rs {
         let entry = SearchEntry::construct(entry);
-        println!("CN: {:?}", entry.attrs);
-    }
-}
-
-pub fn create_user(ldap: &mut LdapConn) {
-    let new_user_dn = "CN=TEST LDAP,OU=HQ,DC=urabi,DC=net";
-
-    let new_user_attrs = vec![
-        ("objectClass", ["top", "person", "organizationalPerson", "user"].iter().cloned().collect::<HashSet<_>>()),
-        ("cn", ["TEST LDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("givenName", ["TEST"].iter().cloned().collect::<HashSet<_>>()),
-        ("sn", ["LDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("displayName", ["TEST LDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("userPrincipalName", ["TESTDLAP@urabi.net"].iter().cloned().collect::<HashSet<_>>()),
-        ("sAMAccountName", ["TESTLDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("mail", ["TESTLDAP@urabi.net"].iter().cloned().collect::<HashSet<_>>()),
-        // Add more attributes as necessary
-    ];
-
-    let res = ldap.add(new_user_dn, new_user_attrs).ok();
-
-    println!("Add result: {:?}", res);
-
-    
-
-    // Convert the password to UTF-16LE and wrap in quotes
-    let mut password_utf16: HashSet<&str> = HashSet::new();
-    password_utf16.insert(&new_password);
-
-    // Set the password using the unicodePwd attribute
-    let modify_password = ldap.modify(
-        new_user_dn,
-        vec![
-            ldap3::Mod::Replace("unicodePwd", password_utf16),
-        ],
-    ).ok();
-
-    println!("Password set successfully {:?}", modify_password);
-
-    // Optionally, enable the account
-    let enable_account = ldap.modify(
-        new_user_dn,
-        vec![
-            ldap3::Mod::Replace("userAccountControl", HashSet::from(["66048"])),  // 512 = Normal account
-        ],
-    ).ok();
-
-    println!("User account enabled successfully, {:?}", enable_account);
-
-    
+            let user: UserAccount = entry.attrs.into();
+            res.push(user);
+        }
+    res
 }
