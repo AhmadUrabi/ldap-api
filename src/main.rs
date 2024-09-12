@@ -5,7 +5,7 @@ use ldap3::{drive, Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
 
 use dotenv::dotenv;
 use rocket::{serde::json::Json, State};
-use user::UserAccount;
+use user::{create_new_user, UserAccount, UserParams};
 
 pub mod auth;
 pub mod user;
@@ -19,6 +19,15 @@ pub async fn get_all_users(state: &State<ServerState>) -> Json<Vec<UserAccount>>
     let mut ldap = state.ldap.lock().await;
     let users = fetch_all_users(&mut ldap).await;   
     Json(users)
+}
+
+#[post("/users", format = "json", data = "<user>")]
+pub async fn create_user(user: Json<UserParams>, state: &State<ServerState>) -> Json<UserAccount> {
+    let mut ldap = state.ldap.lock().await;
+    let user_data = user.into_inner();
+    let new_user = create_new_user(&mut ldap, user_data).await;
+
+    Json(new_user)
 }
 
 #[launch]
@@ -38,17 +47,20 @@ async fn rocket() -> _ {
 
     drive!(conn);
 
+    
+
     ldap.simple_bind(username.as_str(), password.as_str()).await.unwrap().success().unwrap();
 
     let server_state = ServerState {
         ldap: Arc::new(rocket::tokio::sync::Mutex::new(ldap)),
     };
 
-    rocket::build().manage(server_state).mount("/", routes![get_all_users])
+    rocket::build().manage(server_state).mount("/", routes![get_all_users, create_user])
 }
 
 pub async fn fetch_all_users(ldap: &mut Ldap) -> Vec<UserAccount> {
-    let base_dn = "OU=HQ,DC=urabi,DC=net";
+    let base_dn_string = std::env::var("BASE_DN").unwrap();
+    let base_dn = base_dn_string.as_str();
     // Perform a search
     let (rs, _res) = ldap.search(
         base_dn,

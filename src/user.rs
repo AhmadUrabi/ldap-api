@@ -2,8 +2,23 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ldap3::LdapConn;
+use base64::Engine;
+use ldap3::Ldap;
 use serde::{Deserialize, Serialize};
+use ldap3::Mod;
+
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UserParams {
+    pub cn: String,
+    pub givenName: String,
+    pub sn: String,
+    pub displayName: String,
+    pub userPrincipalName: String,
+    pub sAMAccountName: String,
+    pub mail: String,
+    pub password: String,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserAccount {
@@ -80,54 +95,80 @@ impl From<HashMap<String, Vec<String>>> for UserAccount {
     }
 }
 
+pub async fn create_new_user(ldap: &mut Ldap, user: UserParams) -> UserAccount {
+    let binding = format!("CN={},{}", user.cn, std::env::var("BASE_DN").unwrap()).to_owned();
+    let new_user_dn = binding.as_str();
+    let quoted_b64_password = format!("'{}'", user.password);
 
-
-
-
-pub fn create_user(ldap: &mut LdapConn) {
-    let new_user_dn = "CN=TEST LDAP,OU=HQ,DC=urabi,DC=net";
+    let new_password_utf16: Vec<u16> = quoted_b64_password.encode_utf16().collect();
+    let new_password_bytes: Vec<u8> = new_password_utf16.iter().flat_map(|&c| c.to_le_bytes()).collect();
+    let b64_password = base64::engine::general_purpose::STANDARD.encode(&new_password_bytes);
+    
+    let mut password_utf16: HashSet<&[u8]> = HashSet::new();
+    password_utf16.insert(&b64_password.as_bytes());
 
     let new_user_attrs = vec![
-        ("objectClass", ["top", "person", "organizationalPerson", "user"].iter().cloned().collect::<HashSet<_>>()),
-        ("cn", ["TEST LDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("givenName", ["TEST"].iter().cloned().collect::<HashSet<_>>()),
-        ("sn", ["LDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("displayName", ["TEST LDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("userPrincipalName", ["TESTDLAP@urabi.net"].iter().cloned().collect::<HashSet<_>>()),
-        ("sAMAccountName", ["TESTLDAP"].iter().cloned().collect::<HashSet<_>>()),
-        ("mail", ["TESTLDAP@urabi.net"].iter().cloned().collect::<HashSet<_>>()),
-        // Add more attributes as necessary
+        ("objectClass", ["top", "person", "organizationalPerson", "user"].iter().cloned().collect::<HashSet<_>>()), // Object Class
+        ("cn", [user.cn.as_str()].iter().cloned().collect::<HashSet<_>>()), // Common Name
+        ("givenName", [user.givenName.as_str()].iter().cloned().collect::<HashSet<_>>()), // First Name
+        ("sn", [user.sn.as_str()].iter().cloned().collect::<HashSet<_>>()), // Surname
+        ("displayName", [user.givenName.as_str()].iter().cloned().collect::<HashSet<_>>()), // Display Name
+        ("userPrincipalName", [user.userPrincipalName.as_str()].iter().cloned().collect::<HashSet<_>>()), // User Logon Name
+        ("sAMAccountName", [user.sAMAccountName.as_str()].iter().cloned().collect::<HashSet<_>>()), // User Logon Name
+        ("mail", [user.mail.as_str()].iter().cloned().collect::<HashSet<_>>()), // Internal Mail
     ];
-
-    let res = ldap.add(new_user_dn, new_user_attrs).ok();
+    let res = ldap.add(new_user_dn, new_user_attrs).await.ok();
 
     println!("Add result: {:?}", res);
 
-    let new_password = "";
 
-    // Convert the password to UTF-16LE and wrap in quotes
-    let mut password_utf16: HashSet<&str> = HashSet::new();
-    password_utf16.insert(&new_password);
+    set_password(ldap, new_user_dn, &user.password).await.ok();
+    update_user_account_control(ldap, new_user_dn, 66048).await.ok();
 
-    // Set the password using the unicodePwd attribute
-    let modify_password = ldap.modify(
-        new_user_dn,
+    let user = fetch_user(ldap, new_user_dn).await.unwrap();
+
+    user
+}
+
+pub async fn fetch_user(ldap: &mut Ldap, dn: &str) -> Option<UserAccount> {
+    let (rs, _res) = ldap.search(
+        dn,
+        ldap3::Scope::Base,
+        "(objectClass=user)",
+        vec!["*", "+"],
+    ).await.ok()?.success().ok()?;  // Get the search result
+   
+    let entry = rs.into_iter().next()?;
+
+    let entry = ldap3::SearchEntry::construct(entry);
+
+    Some(entry.attrs.into())
+}
+
+async fn set_password(conn: &mut ldap3::Ldap, user_dn: &str, new_password: &str) -> Result<(), ldap3::LdapError> {
+    // Encode the password
+    let attr_name = String::from("unicodePwd").into_bytes();
+    let values: Vec<u8> = format!("\"{}\"",new_password).encode_utf16().flat_map(|v|v.to_le_bytes()).collect();
+    let mut passwd = HashSet::new();
+    passwd.insert(values);
+    let mods = vec![
+        Mod::Replace(attr_name,passwd)
+    ];
+    let result = conn.modify(&user_dn, mods).await.unwrap();
+    println!("Set password result: {:?}", result);
+    Ok(())
+}
+
+
+
+async fn update_user_account_control(conn: &mut ldap3::Ldap, user_dn: &str, flag: u32) -> Result<(), ldap3::LdapError> {
+    // First, get the current userAccountControl value
+    let res = conn.modify(
+        user_dn,
         vec![
-            ldap3::Mod::Replace("unicodePwd", password_utf16),
+            ldap3::Mod::Replace("userAccountControl", HashSet::from([flag.to_string().as_str()])),
         ],
-    ).ok();
-
-    println!("Password set successfully {:?}", modify_password);
-
-    // Optionally, enable the account
-    let enable_account = ldap.modify(
-        new_user_dn,
-        vec![
-            ldap3::Mod::Replace("userAccountControl", HashSet::from(["66048"])),  // 512 = Normal account
-        ],
-    ).ok();
-
-    println!("User account enabled successfully, {:?}", enable_account);
-
-    
+    ).await;
+    println!("Update user account control result: {:?}", res);
+    Ok(())
 }
