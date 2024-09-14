@@ -1,33 +1,38 @@
 #[macro_use] extern crate rocket;
-use std::sync::Arc;
+use std::{sync::Arc, vec};
 
-use ldap3::{drive, Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
+use ldap3::{drive, Ldap, LdapConnAsync, LdapConnSettings};
 
 use dotenv::dotenv;
+use response::ApiResponse;
 use rocket::{serde::json::Json, State};
-use user::{create_new_user, UserAccount, UserParams};
+use user::{UserAccount, UserParams};
 
 pub mod auth;
 pub mod user;
+pub mod response;
 
 pub struct ServerState {
     ldap: Arc<rocket::tokio::sync::Mutex<Ldap>>,
 }
 
 #[get("/users")]
-pub async fn get_all_users(state: &State<ServerState>) -> Json<Vec<UserAccount>> {
+pub async fn get_all_users(state: &State<ServerState>) -> ApiResponse<Vec<UserAccount>> {
     let mut ldap = state.ldap.lock().await;
-    let users = fetch_all_users(&mut ldap).await;   
-    Json(users)
+    let users = UserAccount::fetch_all_users(&mut ldap).await;
+    ApiResponse::new("Success".to_string(), rocket::http::Status::Ok, Some(users))
 }
 
 #[post("/users", format = "json", data = "<user>")]
-pub async fn create_user(user: Json<UserParams>, state: &State<ServerState>) -> Json<UserAccount> {
+pub async fn create_user(user: Json<UserParams>, state: &State<ServerState>) -> ApiResponse<UserAccount> {
     let mut ldap = state.ldap.lock().await;
     let user_data = user.into_inner();
-    let new_user = create_new_user(&mut ldap, user_data).await;
+    let new_user = UserAccount::create_new_user(&mut ldap, user_data).await;
 
-    Json(new_user)
+    match new_user {
+        Ok(user) => ApiResponse::new("Created".to_string(), rocket::http::Status::Created, Some(user)),
+        Err(_) => ApiResponse::new("Error Creating User".to_string(), rocket::http::Status::InternalServerError, None),
+    }
 }
 
 #[launch]
@@ -47,35 +52,16 @@ async fn rocket() -> _ {
 
     drive!(conn);
 
-    
-
     ldap.simple_bind(username.as_str(), password.as_str()).await.unwrap().success().unwrap();
 
     let server_state = ServerState {
         ldap: Arc::new(rocket::tokio::sync::Mutex::new(ldap)),
     };
 
-    rocket::build().manage(server_state).mount("/", routes![get_all_users, create_user])
+    rocket::build().manage(server_state).register("/", catchers![not_found]).mount("/", routes![get_all_users, create_user])
 }
 
-pub async fn fetch_all_users(ldap: &mut Ldap) -> Vec<UserAccount> {
-    let base_dn_string = std::env::var("BASE_DN").unwrap();
-    let base_dn = base_dn_string.as_str();
-    // Perform a search
-    let (rs, _res) = ldap.search(
-        base_dn,
-        Scope::Subtree,
-        "(objectClass=user)",
-        vec!["*", "+"],
-    ).await.unwrap().success().unwrap();
-
-    let mut res = Vec::new();
-
-    // Iterate through search results and print them
-    for entry in rs {
-        let entry = SearchEntry::construct(entry);
-            let user: UserAccount = entry.attrs.into();
-            res.push(user);
-        }
-    res
+#[catch(404)]
+fn not_found(req: &rocket::Request) -> ApiResponse<()> {
+    ApiResponse::new(format!("{} Not Found", req.uri()), rocket::http::Status::NotFound, None)
 }
