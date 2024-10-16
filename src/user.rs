@@ -8,6 +8,8 @@ use ldap3::{Ldap, Scope, SearchEntry};
 use reqwest::Error;
 use serde::{Deserialize, Serialize};
 
+use crate::errors::APIErrors;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserParams {
     pub cn: String,
@@ -125,9 +127,16 @@ impl UserAccount {
     pub async fn create_new_user(
         ldap: &mut Ldap,
         user: UserParams,
-    ) -> Result<UserAccount, ldap3::LdapError> {
+    ) -> Result<UserAccount, APIErrors> {
         let binding = format!("CN={},{}", user.cn, std::env::var("BASE_DN").unwrap()).to_owned();
         let new_user_dn = binding.as_str();
+
+        // Lookup the userPrincipalName to see if it already exists
+        let user_exists = Self::get_dn_from_uname(ldap, user.userPrincipalName.as_str()).await;
+        if user_exists.is_some() {
+            return Err(APIErrors::EntryExists);
+        }
+
         let quoted_b64_password = format!("'{}'", user.password);
 
         let new_password_utf16: Vec<u16> = quoted_b64_password.encode_utf16().collect();
@@ -189,12 +198,13 @@ impl UserAccount {
                 [user.mail.as_str()].iter().cloned().collect::<HashSet<_>>(),
             ), // Internal Mail
         ];
-        let res = ldap.add(new_user_dn, new_user_attrs).await?;
+        let res = ldap.add(new_user_dn, new_user_attrs).await;
+        if res.is_err() {
+            return Err(APIErrors::AddError);
+        }
 
-        println!("Add result: {:?}", res);
-
-        Self::set_password(ldap, new_user_dn, &user.password).await?;
-        Self::update_user_account_control(ldap, new_user_dn, 66048).await?;
+        let _ = Self::set_password(ldap, new_user_dn, &user.password).await;
+        let _ = Self::update_user_account_control(ldap, new_user_dn, 66048).await;
 
         println!("{:?}", user.create_cpanel_account);
 
@@ -206,7 +216,7 @@ impl UserAccount {
 
         match Self::fetch_user(ldap, new_user_dn).await {
             Some(user) => Ok(user),
-            None => Err(ldap3::LdapError::EndOfStream),
+            None => Err(APIErrors::EntryNotFound),
         }
     }
 

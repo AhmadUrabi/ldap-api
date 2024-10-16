@@ -2,7 +2,7 @@
 extern crate rocket;
 use std::{sync::Arc, vec};
 
-use ldap3::{drive, Ldap, LdapConn, LdapConnAsync, LdapConnSettings, LdapError};
+use ldap3::{drive, Ldap, LdapConnAsync, LdapConnSettings, LdapError};
 
 use dotenv::dotenv;
 use response::ApiResponse;
@@ -16,6 +16,7 @@ use rocket::{
 use user::{UserAccount, UserParams};
 
 pub mod auth;
+pub mod errors;
 pub mod response;
 pub mod user;
 
@@ -94,8 +95,8 @@ pub fn options_users() -> ApiResponse<()> {
     )
 }
 
-#[options("/users/<uname>")]
-pub fn options_users_delete(uname: &str) -> ApiResponse<()> {
+#[options("/users/<_uname>")]
+pub fn options_users_delete(_uname: &str) -> ApiResponse<()> {
     ApiResponse::new(
         "Options for /users".to_string(),
         rocket::http::Status::Ok,
@@ -132,11 +133,18 @@ pub async fn create_user(
             rocket::http::Status::Created,
             Some(user),
         ),
-        Err(_) => ApiResponse::new(
-            "Error Creating User".to_string(),
-            rocket::http::Status::InternalServerError,
-            None,
-        ),
+        Err(e) => match e {
+            errors::APIErrors::EntryExists => ApiResponse::new(
+                "User Already Exists".to_string(),
+                rocket::http::Status::Conflict,
+                None,
+            ),
+            _ => ApiResponse::new(
+                "Error Creating User".to_string(),
+                rocket::http::Status::InternalServerError,
+                None,
+            ),
+        },
     }
 }
 
