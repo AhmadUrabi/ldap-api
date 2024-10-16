@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use base64::Engine;
 use ldap3::Mod;
 use ldap3::{Ldap, Scope, SearchEntry};
+use reqwest::Error;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -17,6 +18,7 @@ pub struct UserParams {
     pub sAMAccountName: String,
     pub mail: String,
     pub password: String,
+    pub create_cpanel_account: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -194,6 +196,14 @@ impl UserAccount {
         Self::set_password(ldap, new_user_dn, &user.password).await?;
         Self::update_user_account_control(ldap, new_user_dn, 66048).await?;
 
+        println!("{:?}", user.create_cpanel_account);
+
+        if user.create_cpanel_account.unwrap_or(false) {
+            let cpanel_user = user.userPrincipalName.split('@').next().unwrap();
+            let res = create_cpanel_account(cpanel_user.to_string(), "jh.com.jo".to_string()).await;
+            println!("Cpanel account created: {:?}", res);
+        }
+
         match Self::fetch_user(ldap, new_user_dn).await {
             Some(user) => Ok(user),
             None => Err(ldap3::LdapError::EndOfStream),
@@ -317,4 +327,22 @@ impl From<HashMap<String, Vec<String>>> for UserAccount {
             dSCorePropagationData: attrs.get("dSCorePropagationData").cloned(),
         }
     }
+}
+
+async fn create_cpanel_account(user: String, domain: String) -> Result<String, Error> {
+    let cpanel_url = std::env::var("CPANEL_URL").unwrap();
+    let user_password = std::env::var("CPANEL_PASSWORD").unwrap();
+    let access_token = std::env::var("CPANEL_ACCESS_TOKEN").unwrap();
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!(
+            "{}/execute/Email/add_pop?email={}&password={}&domain={}&quota=2048",
+            cpanel_url, user, user_password, domain
+        ))
+        .header("Authorization", access_token)
+        .send()
+        .await?;
+    let body = res.text().await?;
+    let json = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+    Ok(json["data"].as_str().unwrap_or("").to_string())
 }
